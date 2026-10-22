@@ -99,4 +99,5 @@ WebSocket feed provides output while the job is active. A cancelled in-flight st
 can have its partial output in the combined archive without a completed step blob.
 
 Protocol details and dependency choices are in [docs/protocol.md](docs/protocol.md).
-Live interoperability evidence belongs in [docs/acceptance.md](docs/acceptance.md).
+Successful live run URLs and verification limits are recorded in
+[docs/acceptance.md](docs/acceptance.md).
