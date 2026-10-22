@@ -1,0 +1,11 @@
+name: Inspection fixture
+description: An action reference for the PoC; carcinize does not resolve this manifest
+inputs:
+  message:
+    description: A declaration to inspect
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: exit 96

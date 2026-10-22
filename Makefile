@@ -1,6 +1,6 @@
-.PHONY: verify fmt fmt-check check lint test run
+.PHONY: verify fmt fmt-check check lint test doc-test run
 
-verify: fmt-check check lint test
+verify: fmt-check check lint test doc-test
 
 fmt:
 	cargo fmt --all
@@ -16,6 +16,9 @@ lint:
 
 test:
 	cargo test --workspace --all-targets --all-features --locked
+
+doc-test:
+	cargo test --doc --workspace --locked
 
 run:
 	cargo run --locked -- $(ARGS)

@@ -1,0 +1,73 @@
+name: Carcinize protocol experiment
+run-name: Carcinize inspection (${{ inputs.example }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner_label:
+        description: Label registered by the laptop runner
+        default: carcinize
+        required: true
+      example:
+        description: Minimal protocol probe or semantic inspection
+        type: choice
+        options: [minimal, semantic]
+        default: semantic
+
+permissions:
+  contents: read
+
+jobs:
+  minimal:
+    if: inputs.example == 'minimal'
+    name: Minimal protocol probe
+    runs-on: [self-hosted, "${{ inputs.runner_label }}"]
+    timeout-minutes: 5
+    steps:
+      - name: Inspect one script
+        run: |
+          echo "This declaration must be echoed, not executed"
+          exit 97
+  inspect:
+    if: inputs.example == 'semantic'
+    name: Inspection only — nothing executes
+    runs-on: [self-hosted, "${{ inputs.runner_label }}"]
+    timeout-minutes: 5
+    env:
+      JOB_EXAMPLE: job environment survives decoding
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: A script that must never execute
+        id: script
+        env:
+          BRANCH_EXPRESSION: ${{ github.ref }}
+        working-directory: this-directory-does-not-exist
+        continue-on-error: false
+        timeout-minutes: 1
+        run: |
+          echo "This is a declaration, not an executed command"
+          exit 97
+      - name: Repository action and inputs
+        if: inputs.example == 'semantic'
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ github.ref }}
+      - name: Local action reference
+        if: inputs.example == 'semantic'
+        uses: ./.github/actions/example
+        with:
+          message: ${{ github.repository }}
+      - name: Container action reference
+        if: inputs.example == 'semantic'
+        uses: docker://alpine:3.22
+        with:
+          entrypoint: /bin/sh
+          args: -c "exit 98"
+      - name: Conditional declaration is still inspected
+        if: inputs.example == 'semantic' && false
+        run: |
+          echo "${{ steps.script.outputs.not_produced }}"
+          exit 99

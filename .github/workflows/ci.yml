@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          rustup default stable
+      - name: Verify
+        run: make verify
+      - name: Build binary
+        run: cargo build --release --locked
+      - uses: actions/upload-artifact@v7
+        with:
+          name: carcinize-${{ matrix.os }}
+          path: target/release/carcinize
+
