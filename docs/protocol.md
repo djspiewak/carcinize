@@ -33,17 +33,20 @@ registrations; RemoteAuth registration tokens perform bootstrap and runner-admin
 registration, or a temporary tenant token performs tenant registration;
 the RSA identity obtains runner tokens for broker/acquisition requests; job tokens
 authenticate reporting and renewal. Signed storage URLs receive no bearer header.
-Redirects are disabled, service URLs require HTTPS, and error messages exclude
+Redirects are disabled, service URLs require HTTPS (WSS for the live feed), and error messages exclude
 remote bodies and URL query strings.
 
 The template decoder retains scalar types, ordered mappings (including expression
 keys), sequences, expression and insert nodes, and source coordinates. Script input
 fields become typed script/shell/working-directory fields. Credentials are decoded
 separately so malformed declarations can still receive a failed completion.
+Step/action discriminants and mask hints accept both numeric and named enums,
+as the upstream JSON converters do. Unknown values fail explicitly.
 
-The Results API's status/conclusion values differ from the run-service completion
-values. Their encoders are intentionally separate. For example, completed/success
-is 6/2 in Results and 2/0 in completion step results.
+The Results API's protobuf enums differ from the run-service completion enums.
+Their encoders are intentionally separate. For example, completed/success is
+6/2 in Results; the run service uses the VSS formatter's camel-case enum names,
+`completed`/`succeeded`. Failure annotations use `level: "failure"`.
 
 ## Dependencies
 

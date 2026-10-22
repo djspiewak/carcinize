@@ -67,6 +67,37 @@ fn distinguishes_repository_local_and_container_actions() {
 }
 
 #[test]
+fn accepts_named_step_and_action_discriminants() {
+    for (reference, expected) in [
+        (json!({"type":"script"}), "script"),
+        (
+            json!({"type":"repository","repositoryType":"GitHub","name":"actions/checkout","ref":"v7"}),
+            "repository_action",
+        ),
+        (
+            json!({"type":"Repository","repositoryType":"self","path":"./example"}),
+            "local_action",
+        ),
+        (
+            json!({"type":"containerRegistry","image":"alpine:3"}),
+            "container_action",
+        ),
+    ] {
+        let mut wire = script_step();
+        wire["type"] = json!("action");
+        wire["reference"] = reference;
+        let decoded = decode_step(wire).expect("named discriminator");
+        assert_eq!(
+            serde_json::to_value(decoded).expect("JSON")["kind"],
+            expected
+        );
+    }
+    let mut unknown = script_step();
+    unknown["type"] = json!("new-step-kind");
+    assert!(decode_step(unknown).is_err());
+}
+
+#[test]
 fn preserves_expression_keys_insertions_and_scalar_sources() {
     let value = decode_template(json!({"type":2,"map":[
         {"Key":{"type":4,"directive":"insert"},"Value":{"type":3,"expr":"inputs.env"}},

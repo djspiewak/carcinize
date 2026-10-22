@@ -7,6 +7,7 @@ mod error;
 mod http;
 mod job_context;
 mod model;
+mod protocol_enum;
 mod redact;
 mod reporting;
 mod runner;

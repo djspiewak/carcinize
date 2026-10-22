@@ -39,12 +39,12 @@ enum StepOutcome {
 }
 
 impl StepOutcome {
-    fn task(self) -> u8 {
+    fn task(self) -> &'static str {
         match self {
-            Self::Inspected => 0,
-            Self::Failed => 2,
-            Self::Cancelled => 3,
-            Self::Skipped => 4,
+            Self::Inspected => "succeeded",
+            Self::Failed => "failed",
+            Self::Cancelled => "canceled",
+            Self::Skipped => "skipped",
         }
     }
     fn results(self) -> u8 {
@@ -67,27 +67,47 @@ struct Record {
 impl Record {
     fn wire(&self, results_api: bool) -> Value {
         let (status, conclusion, started, completed) = match &self.phase {
-            Phase::Pending => (if results_api { 5 } else { 0 }, None, None, None),
-            Phase::Running { started } => {
-                (if results_api { 3 } else { 1 }, None, Some(started), None)
-            }
+            Phase::Pending => (
+                if results_api {
+                    json!(5)
+                } else {
+                    json!("pending")
+                },
+                None,
+                None,
+                None,
+            ),
+            Phase::Running { started } => (
+                if results_api {
+                    json!(3)
+                } else {
+                    json!("inProgress")
+                },
+                None,
+                Some(started),
+                None,
+            ),
             Phase::Finished {
                 started,
                 completed,
                 outcome,
             } => (
-                if results_api { 6 } else { 2 },
-                Some(if results_api {
-                    outcome.results()
+                if results_api {
+                    json!(6)
                 } else {
-                    outcome.task()
+                    json!("completed")
+                },
+                Some(if results_api {
+                    json!(outcome.results())
+                } else {
+                    json!(outcome.task())
                 }),
                 started.as_ref(),
                 Some(completed),
             ),
         };
         json!({"external_id":self.id,"number":self.number,"name":self.name,"status":status,
-            "conclusion":conclusion.unwrap_or(0),"started_at":started,"completed_at":completed})
+            "conclusion":conclusion.unwrap_or(if results_api { json!(0) } else { Value::Null }),"started_at":started,"completed_at":completed})
     }
 
     fn finish(&mut self, outcome: StepOutcome) {
@@ -131,9 +151,9 @@ impl<'a> Reporter<'a> {
         Ok(Self {
             http,
             context,
-            results_url: context.results_url.clone().ok_or(Failure::Protocol(
+            results_url: service_url(context.results_url.as_deref().ok_or(Failure::Protocol(
                 "job requires unsupported legacy results protocol",
-            ))?,
+            ))?)?,
             redactor,
             records,
             change_order: 0,
@@ -328,9 +348,6 @@ impl<'a> Reporter<'a> {
         self.context
             .complete(&self.http, conclusion, &steps, diagnostic.as_deref())
             .await?;
-        if let Some(diagnostic) = diagnostic {
-            eprintln!("carcinize: job {}: {diagnostic}", self.context.id);
-        }
         Ok(conclusion)
     }
 }

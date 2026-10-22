@@ -1,6 +1,7 @@
 use crate::{
     error::{Failure, Result},
     http::*,
+    protocol_enum::ProtocolEnum,
     redact::Redactor,
 };
 use chrono::{DateTime, Utc};
@@ -14,8 +15,8 @@ pub(crate) struct JobContext {
     pub id: Uuid,
     pub plan_id: Uuid,
     pub run_url: Url,
-    pub results_url: Option<Url>,
-    pub feed_url: Option<Url>,
+    pub results_url: Option<String>,
+    pub feed_url: Option<String>,
     pub token: String,
     pub billing_owner_id: Option<String>,
     secrets: Vec<String>,
@@ -64,7 +65,7 @@ struct Variable {
 #[derive(Deserialize)]
 struct Mask {
     #[serde(rename = "type")]
-    kind: u32,
+    kind: ProtocolEnum,
     value: String,
 }
 
@@ -76,11 +77,11 @@ pub(crate) enum Conclusion {
 }
 
 impl Conclusion {
-    pub fn task_result(self) -> u8 {
+    pub fn task_result(self) -> &'static str {
         match self {
-            Self::Success => 0,
-            Self::Failed => 2,
-            Self::Cancelled => 3,
+            Self::Success => "succeeded",
+            Self::Failed => "failed",
+            Self::Cancelled => "canceled",
         }
     }
 }
@@ -119,14 +120,12 @@ impl JobContext {
         let results_url = envelope
             .variables
             .get("system.github.results_endpoint")
-            .map(|v| service_url(&v.value))
-            .transpose()?;
+            .map(|v| v.value.clone());
         let feed_url = connection
             .data
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("FeedStreamUrl"))
-            .map(|(_, v)| service_url(v))
-            .transpose()?;
+            .map(|(_, v)| v.clone());
         Ok(Self {
             id: envelope.job_id,
             plan_id: envelope.plan.plan_id,
@@ -148,7 +147,11 @@ impl JobContext {
                 .chain([self.token.as_str(), administrative_token]),
         );
         for mask in &self.masks {
-            match mask.kind {
+            let code = mask
+                .kind
+                .code(&[(1, "variable"), (2, "regex")])
+                .ok_or(Failure::Protocol("unsupported secret masking hint"))?;
+            match code {
                 1 => redactor.add(&mask.value),
                 2 => redactor
                     .add_pattern(&mask.value)
@@ -187,8 +190,11 @@ impl JobContext {
         steps: &[Value],
         diagnostic: Option<&str>,
     ) -> Result<()> {
+        if let Some(message) = diagnostic {
+            eprintln!("carcinize: job {}: {message}", self.id);
+        }
         let annotations = diagnostic
-            .map(|message| vec![json!({"type":"error","message":message})])
+            .map(|message| vec![json!({"level":"failure","message":message})])
             .unwrap_or_default();
         http.send(http.client.post(endpoint(&self.run_url,"completejob")?)
             .header("authorization", authorization("Bearer",&self.token)?)

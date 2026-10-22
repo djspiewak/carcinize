@@ -28,6 +28,7 @@ enum Mode {
     BadSession,
     Renewal,
     LostLease,
+    BadFeed,
 }
 
 type Events = Arc<Mutex<Vec<(String, Option<String>, Value)>>>;
@@ -130,15 +131,21 @@ async fn api(
         } else {
             "33333333-3333-4333-8333-333333333333"
         };
+        let feed_url = if fake.mode == Mode::BadFeed {
+            "http://untrusted.invalid/feed".to_owned()
+        } else {
+            format!("{}feed", base.replacen("http:", "ws:", 1))
+        };
         json!({"messageType":"RunnerJobRequest","jobId":job_id,
             "jobName":"demo","jobDisplayName":"Demo","plan":{"planId":"44444444-4444-4444-8444-444444444444"},
-            "billingOwnerId":"billing","variables":{"system.github.results_endpoint":{"value":format!("{base}results/")},
+            "billingOwnerId":"billing","mask":[{"type":"regex","value":"masked-by-hint-[0-9]+"}],
+            "variables":{"system.github.results_endpoint":{"value":format!("{base}results/")},
                 "sensitive":{"value":"job-secret-value","isSecret":true}},
             "resources":{"endpoints":[{"name":"SystemVssConnection","url":format!("{base}run/"),
-                "authorization":{"parameters":{"AccessToken":"job-token"}},"data":{"FeedStreamUrl":format!("{base}feed")}}]},
+                "authorization":{"parameters":{"AccessToken":"job-token"}},"data":{"FeedStreamUrl":feed_url}}]},
             "steps":[{"type":4,"id":"11111111-1111-4111-8111-111111111111","displayName":"Declared step",
                 "reference":{"type":reference},"condition":"success() && false",
-                "inputs":{"type":2,"map":[{"Key":"script","Value":format!("touch '{}'\necho job-secret-value\nexit 97",fake.marker)}]}}]})
+                "inputs":{"type":2,"map":[{"Key":"script","Value":format!("touch '{}'\necho job-secret-value masked-by-hint-123\nexit 97",fake.marker)}]}}]})
     } else if path == "/run/renewjob" {
         let previous = fake
             .renewals
@@ -291,6 +298,7 @@ async fn handles_two_jobs_with_live_and_archived_logs_then_removes_its_runner() 
             let text = body.as_str().expect("log body");
             assert!(text.contains("exit 97"));
             assert!(!text.contains("job-secret-value"));
+            assert!(!text.contains("masked-by-hint-123"));
             assert!(text.contains("***"));
         }
         if name == "feed-connect"
@@ -300,7 +308,9 @@ async fn handles_two_jobs_with_live_and_archived_logs_then_removes_its_runner() 
             assert_eq!(auth.as_deref(), Some("Bearer job-token"));
         }
         if name == "POST /run/completejob" {
-            assert_eq!(body["conclusion"], 0);
+            assert_eq!(body["conclusion"], "succeeded");
+            assert_eq!(body["stepResults"][0]["status"], "completed");
+            assert_eq!(body["stepResults"][0]["conclusion"], "succeeded");
         }
     }
     assert!(events.iter().any(|(n, _, _)| n == "DELETE /broker/session"));
@@ -319,7 +329,8 @@ async fn failed_log_upload_cannot_report_success() {
         .find(|(n, _, _)| n == "POST /run/completejob")
         .expect("failed completion")
         .2;
-    assert_eq!(body["conclusion"], 2);
+    assert_eq!(body["conclusion"], "failed");
+    assert_eq!(body["annotations"][0]["level"], "failure");
 }
 
 #[tokio::test]
@@ -331,7 +342,7 @@ async fn unknown_step_semantics_fail_the_acquired_job() {
         .find(|(n, _, _)| n == "POST /run/completejob")
         .expect("failed completion")
         .2;
-    assert_eq!(body["conclusion"], 2);
+    assert_eq!(body["conclusion"], "failed");
 }
 
 #[tokio::test]
@@ -358,7 +369,7 @@ async fn cancellation_interrupts_reporting_and_completes_as_cancelled() {
         .find(|(n, _, _)| n == "POST /run/completejob")
         .expect("cancelled completion")
         .2;
-    assert_eq!(body["conclusion"], 3);
+    assert_eq!(body["conclusion"], "canceled");
 }
 
 #[tokio::test]
@@ -378,5 +389,22 @@ async fn losing_the_lease_interrupts_reporting_and_prevents_success() {
         .find(|(name, _, _)| name == "POST /run/completejob")
         .expect("failed completion")
         .2;
-    assert_eq!(body["conclusion"], 2);
+    assert_eq!(body["conclusion"], "failed");
+}
+
+#[tokio::test]
+async fn invalid_feed_url_fails_the_job_and_still_cleans_up() {
+    let (fake, result) = exercise(Mode::BadFeed).await;
+    assert_eq!(result.expect("runner").jobs_failed, 1);
+    let events = fake.events.lock().expect("events");
+    let complete = events
+        .iter()
+        .find(|(name, _, _)| name == "POST /run/completejob")
+        .expect("completion");
+    assert_eq!(complete.2["conclusion"], "failed");
+    assert!(!events.iter().any(|(name, _, _)| name == "feed-connect"));
+    assert_eq!(
+        events.last().expect("cleanup").0,
+        "DELETE /repos/example/project/actions/runners/42"
+    );
 }

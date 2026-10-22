@@ -1,6 +1,6 @@
 use crate::{
     error::{Failure, Result},
-    http::{REQUEST_TIMEOUT, USER_AGENT, authorization},
+    http::{REQUEST_TIMEOUT, USER_AGENT, authorization, service_url},
 };
 use futures_util::{SinkExt, StreamExt, stream::SplitSink};
 use serde_json::json;
@@ -20,15 +20,8 @@ pub(super) struct Feed {
 }
 
 impl Feed {
-    pub async fn connect(url: &Url, token: &str) -> Result<Self> {
-        let mut url = url.clone();
-        let scheme = if cfg!(test) && url.scheme() == "http" {
-            "ws"
-        } else {
-            "wss"
-        };
-        url.set_scheme(scheme)
-            .map_err(|_| Failure::Protocol("invalid live feed URL"))?;
+    pub async fn connect(url: &str, token: &str) -> Result<Self> {
+        let url = websocket_url(url)?;
         let mut request = url
             .as_str()
             .into_client_request()
@@ -95,6 +88,22 @@ impl Feed {
             .map_err(|_| Failure::Protocol("live feed close timed out"))?
             .map_err(|_| Failure::Protocol("live feed close failed"))
     }
+}
+
+fn websocket_url(value: &str) -> Result<Url> {
+    let mut url = Url::parse(value).map_err(|_| Failure::Protocol("invalid live feed URL"))?;
+    // Validate the corresponding HTTP URL with the same TLS/authority policy.
+    let http_scheme = match url.scheme() {
+        "wss" | "https" => "https",
+        "ws" | "http" => "http",
+        _ => return Err(Failure::Protocol("unsupported live feed URL scheme")),
+    };
+    url.set_scheme(http_scheme)
+        .map_err(|_| Failure::Protocol("invalid live feed URL"))?;
+    service_url(url.as_str())?;
+    url.set_scheme(if http_scheme == "https" { "wss" } else { "ws" })
+        .map_err(|_| Failure::Protocol("invalid live feed URL"))?;
+    Ok(url)
 }
 
 impl Drop for Feed {

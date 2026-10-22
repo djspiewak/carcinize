@@ -1,4 +1,5 @@
 //! The inspected declarations, deliberately independent of transport credentials.
+use crate::protocol_enum::ProtocolEnum;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -127,7 +128,7 @@ impl Job {
 #[serde(rename_all = "camelCase")]
 struct WireStep {
     #[serde(rename = "type")]
-    step_type: u32,
+    step_type: ProtocolEnum,
     id: Uuid,
     name: Option<String>,
     context_name: Option<String>,
@@ -154,7 +155,7 @@ fn enabled() -> bool {
 #[serde(rename_all = "camelCase")]
 struct WireReference {
     #[serde(rename = "type")]
-    source_type: u32,
+    source_type: ProtocolEnum,
     repository_type: Option<String>,
     name: Option<String>,
     #[serde(rename = "ref")]
@@ -167,12 +168,16 @@ struct WireReference {
 pub(crate) fn decode_step(value: Value) -> Result<Step, DecodeError> {
     let wire: WireStep =
         serde_json::from_value(value).map_err(|_| DecodeError::Malformed("step declaration"))?;
-    if wire.step_type != 4 {
+    if wire.step_type.code(&[(4, "action")]).is_none() {
         return Err(DecodeError::Unsupported("step type"));
     }
     let inputs = optional_template(wire.inputs)?;
-    let kind = match wire.reference.source_type {
-        1 => match wire.reference.repository_type.as_deref() {
+    let kind = match wire.reference.source_type.code(&[
+        (1, "repository"),
+        (2, "containerRegistry"),
+        (3, "script"),
+    ]) {
+        Some(1) => match wire.reference.repository_type.as_deref() {
             Some(t) if t.eq_ignore_ascii_case("self") => StepKind::LocalAction {
                 path: wire.reference.path,
                 inputs,
@@ -193,7 +198,7 @@ pub(crate) fn decode_step(value: Value) -> Result<Step, DecodeError> {
             },
             _ => return Err(DecodeError::Unsupported("action repository type")),
         },
-        2 => StepKind::ContainerAction {
+        Some(2) => StepKind::ContainerAction {
             image: wire
                 .reference
                 .image
@@ -201,7 +206,7 @@ pub(crate) fn decode_step(value: Value) -> Result<Step, DecodeError> {
                 .ok_or(DecodeError::Malformed("container image"))?,
             inputs,
         },
-        3 => {
+        Some(3) => {
             let fields = inputs
                 .as_ref()
                 .ok_or(DecodeError::Malformed("script inputs"))?;
