@@ -1,0 +1,14 @@
+[package]
+name = "carcinize"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "A small application for working with the GitHub API"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+
