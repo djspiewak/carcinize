@@ -65,7 +65,7 @@ async fn tenant_registration_bootstrap_returns_a_modern_broker_identity() {
     .expect("tenant registration");
     assert_eq!(registered.id, 42);
     assert_eq!(
-        registered.authorization.server_url,
+        registered.authorization.expect("authorization").server_url,
         server.base.join("broker/").expect("URL").as_str()
     );
     let captured = captured.lock().expect("capture");
@@ -196,4 +196,54 @@ fn signs_a_verifiable_ps256_client_assertion_with_injected_time() {
     assert_eq!(claims["sub"], "client-id");
     assert_eq!(claims["nbf"], 1_699_999_970_u64);
     assert_eq!(claims["exp"], 1_700_000_270_u64);
+}
+
+#[tokio::test]
+async fn malformed_tenant_authorization_still_removes_the_created_runner() {
+    use axum::{
+        http::{Method, StatusCode},
+        response::IntoResponse,
+    };
+    use std::time::Duration;
+    let removed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    async fn api(
+        State(removed): State<Arc<std::sync::atomic::AtomicBool>>,
+        method: Method,
+        headers: HeaderMap,
+        uri: axum::http::Uri,
+    ) -> axum::response::Response {
+        let base = format!("http://{}/", headers["host"].to_str().expect("host"));
+        let body = match uri.path() {
+            "/repos/example/project/actions/runners/registration-token" => {
+                json!({"token":"registration"})
+            }
+            "/actions/runner-registration" => {
+                json!({"url":format!("{base}tenant/"), "token":"tenant", "token_schema":"OAuthAccessToken"})
+            }
+            "/tenant/_apis/distributedtask/pools" => {
+                json!({"value":[{"id":17,"isInternal":true,"isHosted":false}]})
+            }
+            "/tenant/_apis/distributedtask/pools/17/agents" => {
+                json!({"id":42,"authorization":false})
+            }
+            "/repos/example/project/actions/runners/42" if method == Method::DELETE => {
+                removed.store(true, std::sync::atomic::Ordering::SeqCst);
+                json!({})
+            }
+            _ => return StatusCode::NOT_FOUND.into_response(),
+        };
+        Json(body).into_response()
+    }
+    let server = Server::start(Router::new().fallback(api).with_state(removed.clone())).await;
+    let result = crate::github::runner::run_with(
+        Config::new("example/project", vec![], None, "admin".into()).expect("config"),
+        Http::new().expect("http"),
+        server.base.clone(),
+        Identity::test_identity(),
+        std::future::pending(),
+        Duration::from_secs(60),
+    )
+    .await;
+    assert!(result.is_err());
+    assert!(removed.load(std::sync::atomic::Ordering::SeqCst));
 }

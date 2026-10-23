@@ -7,13 +7,7 @@ use uuid::Uuid;
 mod template;
 pub(crate) use template::{TemplateValue, decode_template};
 
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum DecodeError {
-    #[error("malformed {0}")]
-    Malformed(&'static str),
-    #[error("unsupported {0}")]
-    Unsupported(&'static str),
-}
+pub(crate) use crate::error::DecodeError;
 
 #[derive(Debug, Serialize)]
 pub(crate) struct Job {

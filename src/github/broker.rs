@@ -1,3 +1,4 @@
+use super::COMPATIBLE_RUNNER_VERSION;
 use crate::{
     config::{runner_arch, runner_os},
     error::{Failure, Result},

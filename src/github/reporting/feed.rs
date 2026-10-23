@@ -1,6 +1,7 @@
+use crate::github::USER_AGENT;
 use crate::{
     error::{Failure, Result},
-    http::{REQUEST_TIMEOUT, USER_AGENT, authorization, service_url},
+    http::{REQUEST_TIMEOUT, authorization, service_url},
 };
 use futures_util::{SinkExt, StreamExt, stream::SplitSink};
 use serde_json::json;

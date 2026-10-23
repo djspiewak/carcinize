@@ -11,12 +11,7 @@ use std::time::Duration;
 
 const PATCH_SIZE: usize = 64 * 1024;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Outcome {
-    Success,
-    Failed,
-    Cancelled,
-}
+pub(super) use crate::lifecycle::Outcome;
 
 #[derive(Clone, Copy)]
 pub(super) struct Timing {
@@ -44,20 +39,6 @@ fn stopped(state: Option<RemoteState>) -> Result<()> {
             "GitLab completed the job before inspection finished",
         )),
         Some(RemoteState::Running) | None => Ok(()),
-    }
-}
-
-pub(super) async fn inspect(
-    api: &Api,
-    context: &Context,
-    trace: &Trace,
-    offset: &mut usize,
-    timing: Timing,
-) -> Result<()> {
-    // The heartbeat remains owned by this scope and ends before terminal reporting.
-    tokio::select! {
-        result = upload(api, context, trace, offset, timing) => result,
-        result = heartbeat(api, context, timing) => result,
     }
 }
 

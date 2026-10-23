@@ -69,24 +69,74 @@ struct Mask {
     value: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) enum Conclusion {
-    Success,
-    Failed,
-    Cancelled,
-}
-
-impl Conclusion {
-    pub fn task_result(self) -> &'static str {
-        match self {
-            Self::Success => "succeeded",
-            Self::Failed => "failed",
-            Self::Cancelled => "canceled",
-        }
+pub(crate) use crate::lifecycle::Outcome as Conclusion;
+fn task_result(outcome: Conclusion) -> &'static str {
+    match outcome {
+        Conclusion::Success => "succeeded",
+        Conclusion::Failed => "failed",
+        Conclusion::Cancelled => "canceled",
     }
 }
 
 impl JobContext {
+    // Capture only the authority needed to release ownership. Optional declarations
+    // and mask metadata are decoded later, inside the failed-completion scope.
+    pub fn identity(value: &Value) -> Result<Self> {
+        let id = value
+            .get("jobId")
+            .cloned()
+            .and_then(|v| serde_json::from_value::<Uuid>(v).ok())
+            .filter(|id| !id.is_nil())
+            .ok_or(Failure::Protocol("missing job cleanup identity"))?;
+        let plan_id = value
+            .pointer("/plan/planId")
+            .cloned()
+            .and_then(|v| serde_json::from_value::<Uuid>(v).ok())
+            .filter(|id| !id.is_nil())
+            .ok_or(Failure::Protocol("missing plan cleanup identity"))?;
+        let connection = value
+            .pointer("/resources/endpoints")
+            .and_then(Value::as_array)
+            .and_then(|items| {
+                items.iter().find(|e| {
+                    e.get("name")
+                        .and_then(Value::as_str)
+                        .is_some_and(|name| name.eq_ignore_ascii_case("SystemVssConnection"))
+                })
+            })
+            .ok_or(Failure::Protocol("job has no system connection"))?;
+        let token = connection
+            .pointer("/authorization/parameters")
+            .and_then(Value::as_object)
+            .and_then(|parameters| {
+                parameters
+                    .iter()
+                    .find(|(key, _)| key.eq_ignore_ascii_case("AccessToken"))
+            })
+            .and_then(|(_, value)| value.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or(Failure::Protocol("job has no reporting token"))?
+            .to_owned();
+        let url = connection
+            .get("url")
+            .and_then(Value::as_str)
+            .ok_or(Failure::Protocol("job has no reporting URL"))?;
+        Ok(Self {
+            id,
+            plan_id,
+            run_url: service_url(url)?,
+            token,
+            billing_owner_id: value
+                .get("billingOwnerId")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            results_url: None,
+            feed_url: None,
+            secrets: Vec::new(),
+            masks: Vec::new(),
+        })
+    }
+
     pub fn decode(value: &Value) -> Result<Self> {
         let envelope: Envelope = serde_json::from_value(value.clone())
             .map_err(|_| Failure::Protocol("malformed job service envelope"))?;
@@ -145,14 +195,14 @@ impl JobContext {
                 .iter()
                 .map(String::as_str)
                 .chain([self.token.as_str(), administrative_token]),
-        );
+        )?;
         for mask in &self.masks {
             let code = mask
                 .kind
                 .code(&[(1, "variable"), (2, "regex")])
                 .ok_or(Failure::Protocol("unsupported secret masking hint"))?;
             match code {
-                1 => redactor.add(&mask.value),
+                1 => redactor.add(&mask.value)?,
                 2 => redactor
                     .add_pattern(&mask.value)
                     .map_err(|_| Failure::Protocol("unsupported secret masking expression"))?,
@@ -198,7 +248,7 @@ impl JobContext {
             .unwrap_or_default();
         http.send(http.client.post(endpoint(&self.run_url,"completejob")?)
             .header("authorization", authorization("Bearer",&self.token)?)
-            .json(&json!({"planId":self.plan_id,"jobId":self.id,"conclusion":conclusion.task_result(),
+            .json(&json!({"planId":self.plan_id,"jobId":self.id,"conclusion":task_result(conclusion),
                 "outputs":{},"stepResults":steps,"annotations":annotations,"billingOwnerId":self.billing_owner_id})),
             "complete job").await?;
         Ok(())

@@ -5,6 +5,9 @@ mod error;
 mod github;
 mod gitlab;
 mod http;
+mod inspection;
+mod lifecycle;
+mod preparation;
 mod redact;
 mod runner;
 

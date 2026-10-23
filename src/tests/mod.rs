@@ -2,6 +2,8 @@ use axum::Router;
 use tokio::{net::TcpListener, task::JoinHandle};
 use url::Url;
 
+pub(crate) mod contracts;
+mod github_fake;
 mod lifecycle;
 mod registration;
 mod transport;

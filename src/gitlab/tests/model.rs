@@ -1,5 +1,5 @@
 use super::*;
-use crate::{http::MAX_BODY, redact::Redactor};
+use crate::{inspection::MAX_OUTPUT, redact::Redactor};
 use proptest::prelude::*;
 
 #[test]
@@ -100,7 +100,7 @@ fn rendering_rejects_oversized_output_and_escapes_terminal_controls() {
     .expect("utf8");
     assert!(!text.contains("\u{1b}[0Ksection_start:forged"));
     let mut input = super::job();
-    input["steps"][0]["script"] = json!(["x".repeat(MAX_BODY)]);
+    input["steps"][0]["script"] = json!(["x".repeat(MAX_OUTPUT)]);
     assert!(
         trace::render(
             &super::super::model::Job::decode(input).expect("job"),

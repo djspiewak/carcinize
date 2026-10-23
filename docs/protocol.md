@@ -51,6 +51,48 @@ Their encoders are intentionally separate. For example, completed/success is
 6/2 in Results; the run service uses the VSS formatter's camel-case enum names,
 `completed`/`succeeded`. Failure annotations use `level: "failure"`.
 
+## Shared inspection and lifecycle policy
+
+The provider captures registration and minimal job cleanup identities before
+validating ancillary authorization, declaration, or masking metadata. Malformed
+metadata with a usable identity therefore still triggers deletion or failed job
+completion. Registration is never retried; deletion of the owned runner permits
+four total attempts with 2/4/6-second backoffs (at most 132 seconds with request
+timeouts). Lost responses without usable identity still require manual recovery.
+
+Declaration preparation runs on one owned blocking worker, joined on interruption.
+The shared preparation validator admits at most 8,192 values, depth 48, and 8 MiB
+of text/key/numeric data per document. Mask construction admits at most 384 expanded
+entries and 32 KiB of literal/pattern source metadata; each regex has a 256 KiB
+compiled-size limit. A shared 64 Mi-unit work budget charges literal scans and
+output plus every regex search, including repeated suffix scans. Regex charges
+use compiled NFA memory times remaining input bytes, with a factor of two for
+iterator advances that skip empty matches. Each advance is capped at 4 Mi units;
+cancellation is checked between advances and values. These conservative limits
+can reject large inputs even when a particular regex would match quickly.
+PikeVM retains leftmost-first, greedy matching; budget exhaustion fails inspection.
+Rendered declarations are checked again before masking and bounded serialization.
+
+Shared rendering masks decoded values, scalar spellings, and mapping keys before
+JSON escaping. Key collisions fail inspection. Matches refer only to original
+text, so literal or regex matches cannot repeatedly expand inserted `***` markers.
+GitHub templates and their source coordinates remain provider-specific; no common
+job schema replaces them. Timestamps are supplied to pure preparation.
+
+An initial lease renewal precedes preparation. One liveness future then retains
+renewal timing and broker cancellation across preparation, step reporting, combined
+log publication, and terminal acknowledgment. Final log publication is drained
+before choosing the completion outcome, so cancellation or lease loss during that
+publication cannot submit success. Local shutdown keeps renewal active while a
+final write drains. Once a terminal request is in flight, its acknowledgment is
+retained; shutdown cannot retroactively change a confirmed outcome. Operational
+shutdown errors are returned after cleanup even if reporting succeeds.
+
+Shared supervision imposes a 24-hour preparation/inspection safety deadline.
+Final HTTP writes and cleanup remain owned and use their bounded request timeouts;
+they may extend beyond the inspection deadline. Tests use local protocol fakes,
+shared behavioral assertions, and deterministic supervisor/worker tests.
+
 ## Dependencies
 
 - `tokio` owns asynchronous I/O, timers, signals, and task lifetimes.
@@ -61,8 +103,9 @@ Their encoders are intentionally separate. For example, completed/success is
 - `rsa` generates ephemeral RSA keys. `jsonwebtoken` delegates PS256 signing to
   ring from DER keys; PEM parsing is disabled. `rand` supplies OS randomness,
   `base64` encodes public-key components, and `uuid` supplies invocation identities.
-- `chrono` formats protocol timestamps. `regex` implements supplied secret-mask
-  hints; unsupported hints fail closed.
+- `chrono` formats protocol timestamps. `regex-automata` implements bounded
+  supplied secret-mask hints; `regex` recognizes fixed URL credential patterns.
+  Unsupported hints fail closed.
 - `clap` handles the CLI; `thiserror` preserves typed internal failures;
   `anyhow` adds context at the binary boundary.
 - Test-only `axum`, `tempfile`, and `proptest` provide local boundary fakes,

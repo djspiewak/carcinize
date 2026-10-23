@@ -4,8 +4,6 @@ use serde::de::DeserializeOwned;
 use std::time::Duration;
 use url::Url;
 
-pub(crate) const COMPATIBLE_RUNNER_VERSION: &str = "2.338.1";
-pub(crate) const USER_AGENT: &str = "carcinize/0.1.0 (GitHub runner protocol 2.338.1)";
 pub(crate) const MAX_BODY: usize = 8 * 1024 * 1024;
 pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const POLL_TIMEOUT: Duration = Duration::from_secs(90);
@@ -16,8 +14,9 @@ pub(crate) struct Http {
 }
 
 impl Http {
+    #[cfg(test)]
     pub fn new() -> Result<Self> {
-        Self::with_user_agent(USER_AGENT)
+        Self::with_user_agent("carcinize/0.1.0")
     }
 
     pub fn with_user_agent(user_agent: &'static str) -> Result<Self> {

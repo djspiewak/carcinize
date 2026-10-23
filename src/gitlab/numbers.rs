@@ -6,7 +6,7 @@ use serde_json::Value;
 // (including keys and escapes) or number. All other bytes belong to already
 // validated structure or the literals true/false/null, which contain no digits.
 pub(super) fn validate(validated: &str) -> Result<()> {
-    if validated.len() > crate::http::MAX_BODY {
+    if validated.len() > crate::inspection::MAX_OUTPUT {
         return Err(Failure::Protocol(
             "GitLab declaration exceeds 8 MiB preparation budget",
         ));

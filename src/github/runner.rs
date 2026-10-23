@@ -5,10 +5,12 @@ use crate::{
     github::auth::{Identity, RunnerAuth, register_runner, remove_runner},
     github::broker::{Broker, Message},
     github::job_context::{Conclusion, JobContext},
-    github::model::Job,
+    github::preparation,
     github::reporting::Reporter,
     http::{Http, service_url},
+    lifecycle::{self, Supervisor},
 };
+use futures_util::FutureExt;
 use std::{future::Future, pin::Pin, time::Duration};
 use url::Url;
 
@@ -25,7 +27,7 @@ pub async fn run(
         .map_err(Failure::from)??;
     Ok(run_with(
         config,
-        Http::new()?,
+        Http::with_user_agent(super::USER_AGENT)?,
         service_url("https://api.github.com/")?,
         identity,
         shutdown,
@@ -43,27 +45,28 @@ pub(crate) async fn run_with(
     renewal_period: Duration,
 ) -> Result<RunSummary> {
     tokio::pin!(shutdown);
-    let registered = {
-        let registration = register_runner(&http, &api, &config, &identity);
-        tokio::pin!(registration);
-        tokio::select! {
-        result = &mut registration => result?,
-        signal = &mut shutdown => {
-            // Finish a registration already in flight so its server identity can be removed.
-            let registered = registration.await?;
-            remove_runner(&http, &api, &config, registered.id).await?;
-            signal?;
-            return Ok(RunSummary::default());
-        }
-        }
-    };
+    let (registered, signal) = lifecycle::acquire(
+        register_runner(&http, &api, &config, &identity),
+        shutdown.as_mut(),
+    )
+    .await;
+    let registered = registered?;
+    if let Some(signal) = signal {
+        return lifecycle::combine(
+            signal
+                .map(|()| RunSummary::default())
+                .map_err(Failure::from),
+            remove(&http, &api, &config, registered.id).await,
+        );
+    }
     let id = registered.id;
     let result = async {
-        let auth = RunnerAuth::new(identity, &registered.authorization)?;
+        let authorization = registered.authorization?;
+        let auth = RunnerAuth::new(identity, &authorization)?;
         let mut broker = Broker::connect(
             http.clone(),
             auth,
-            service_url(&registered.authorization.server_url)?,
+            service_url(&authorization.server_url)?,
             id,
             &config.name,
         )
@@ -81,22 +84,21 @@ pub(crate) async fn run_with(
         )
         .await;
         let cleanup = broker.close().await;
-        combine(result, cleanup)
+        lifecycle::combine(result, cleanup)
     }
     .await;
-    let cleanup = remove_runner(&http, &api, &config, id).await;
-    combine(result, cleanup)
+    let cleanup = remove(&http, &api, &config, id).await;
+    lifecycle::combine(result, cleanup)
 }
 
-fn combine<T>(result: Result<T>, cleanup: Result<()>) -> Result<T> {
-    match (result, cleanup) {
-        (Ok(value), Ok(())) => Ok(value),
-        (Err(error), Err(cleanup)) => {
-            eprintln!("carcinize: cleanup also failed: {cleanup}");
-            Err(error)
-        }
-        (Err(error), _) | (_, Err(error)) => Err(error),
-    }
+async fn remove(http: &Http, api: &Url, config: &Config, id: u64) -> Result<()> {
+    lifecycle::retry(
+        || remove_runner(http, api, config, id),
+        Failure::transient,
+        3,
+        Duration::from_secs(2),
+    )
+    .await
 }
 
 async fn listen<F: Future<Output = std::io::Result<()>>>(
@@ -140,34 +142,19 @@ async fn listen<F: Future<Output = std::io::Result<()>>>(
             }
             Err(error) => return Err(error),
         };
-        let context = JobContext::decode(&payload)?;
+        let context = JobContext::identity(&payload)?;
         eprintln!("carcinize: inspecting job {}", context.id);
-        let job = Job::decode(payload);
-        let (conclusion, stop) = match job {
-            Ok(job) => {
-                inspect_job(
-                    http,
-                    config,
-                    broker,
-                    &context,
-                    &job,
-                    shutdown.as_mut(),
-                    renewal_period,
-                )
-                .await?
-            }
-            Err(error) => {
-                context
-                    .complete(http, Conclusion::Failed, &[], Some(&error.to_string()))
-                    .await?;
-                (Conclusion::Failed, false)
-            }
-        };
-        match conclusion {
-            Conclusion::Success => summary.jobs_inspected += 1,
-            Conclusion::Failed => summary.jobs_failed += 1,
-            Conclusion::Cancelled => summary.jobs_cancelled += 1,
-        }
+        let (conclusion, stop) = inspect_job(
+            http,
+            config,
+            broker,
+            &context,
+            payload,
+            shutdown.as_mut(),
+            renewal_period,
+        )
+        .await?;
+        summary.record(conclusion);
         eprintln!("carcinize: job {} completed: {conclusion:?}", context.id);
         if stop {
             break;
@@ -181,46 +168,146 @@ async fn inspect_job<F: Future<Output = std::io::Result<()>>>(
     config: &Config,
     broker: &mut Broker,
     context: &JobContext,
-    job: &Job,
+    payload: serde_json::Value,
     mut shutdown: Pin<&mut F>,
     renewal_period: Duration,
 ) -> Result<(Conclusion, bool)> {
-    let setup = context
-        .redactor(&config.token)
-        .and_then(|redactor| Reporter::new(http.clone(), context, redactor, job));
-    let mut reporter = match setup {
+    let mut supervisor = Supervisor::new(
+        None,
+        Some(tokio::time::Instant::now() + Duration::from_secs(24 * 60 * 60)),
+    );
+    // Establish the lease before expensive work, then retain the same monitor
+    // across every phase. A failed monitor is fused so cleanup cannot repoll it.
+    let locked_until = match supervisor
+        .run(
+            context.renew(http),
+            std::future::pending(),
+            shutdown.as_mut(),
+        )
+        .await
+    {
+        Ok(locked_until) => locked_until,
+        Err(error) => {
+            let conclusion = if matches!(error, Failure::Cancelled) {
+                Conclusion::Cancelled
+            } else {
+                Conclusion::Failed
+            };
+            let (result, _) = supervisor
+                .drain(
+                    context.complete(http, conclusion, &[], Some(&error.to_string())),
+                    std::future::pending(),
+                    shutdown.as_mut(),
+                )
+                .await;
+            return supervisor.finish(result.map(|()| conclusion));
+        }
+    };
+    let liveness = monitor(http, broker, context, locked_until, renewal_period).fuse();
+    tokio::pin!(liveness);
+    let admin = config.token.clone();
+    let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let prepared = crate::preparation::owned(
+        move |canceled| preparation::prepare(payload, &admin, &canceled, &timestamp),
+        supervisor.interrupt(liveness.as_mut(), shutdown.as_mut()),
+    )
+    .await;
+    let prepared = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            let conclusion = if matches!(error, Failure::Cancelled) {
+                Conclusion::Cancelled
+            } else {
+                Conclusion::Failed
+            };
+            // Preparation diagnostics are static; never reflect an unmasked payload.
+            let (result, _) = supervisor
+                .drain(
+                    context.complete(http, conclusion, &[], Some(&error.to_string())),
+                    liveness.as_mut(),
+                    shutdown.as_mut(),
+                )
+                .await;
+            return supervisor.finish(result.map(|()| conclusion));
+        }
+    };
+    let mut reporter = match Reporter::new(
+        http.clone(),
+        &prepared.context,
+        prepared.redactor,
+        &prepared.steps,
+    ) {
         Ok(reporter) => reporter,
         Err(error) => {
-            context
-                .complete(http, Conclusion::Failed, &[], Some(&error.to_string()))
-                .await?;
-            return Ok((Conclusion::Failed, false));
+            let (result, _) = supervisor
+                .drain(
+                    context.complete(http, Conclusion::Failed, &[], Some(&error.to_string())),
+                    liveness.as_mut(),
+                    shutdown.as_mut(),
+                )
+                .await;
+            return supervisor.finish(result.map(|()| Conclusion::Failed));
         }
     };
-    let mut stop = false;
-    let inspection = match context.renew(http).await {
-        Err(error) => Err(error),
-        Ok(locked_until) => {
-            let renewal = context.maintain_lease(http, locked_until, renewal_period);
-            let inspect = reporter.inspect(job);
-            tokio::pin!(renewal, inspect);
-            loop {
-                tokio::select! {
-                    result = &mut inspect => break result,
-                    result = &mut renewal => break result,
-                    signal = &mut shutdown => {
-                        stop = true;
-                        break match signal { Ok(()) => Err(Failure::Cancelled), Err(e) => Err(e.into()) };
-                    },
-                    message = broker.poll(true) => match message {
-                        Ok(Some(Message::Cancel(id))) if id == context.id => break Err(Failure::Cancelled),
-                        Ok(Some(Message::Job(_))) => break Err(Failure::Protocol("broker assigned work while runner is busy")),
-                        Ok(_) => {},
-                        Err(error) => break Err(error),
-                    },
-                }
+    let mut inspection = supervisor
+        .run(
+            reporter.inspect(&prepared.steps),
+            liveness.as_mut(),
+            shutdown.as_mut(),
+        )
+        .await;
+    reporter.settle(&inspection);
+    let (published, interruption) = supervisor
+        .drain(reporter.publish(), liveness.as_mut(), shutdown.as_mut())
+        .await;
+    if let Some(error) = interruption
+        && (matches!(error, Failure::Cancelled) || inspection.is_ok())
+    {
+        inspection = Err(error);
+    }
+    inspection = lifecycle::combine(inspection, published);
+    // Observe any already-ready interruption before committing the terminal
+    // outcome. This checkpoint performs no I/O and cannot abandon a write.
+    if let Err(error) = supervisor
+        .run(
+            std::future::ready(Ok(())),
+            liveness.as_mut(),
+            shutdown.as_mut(),
+        )
+        .await
+        && (matches!(error, Failure::Cancelled) || inspection.is_ok())
+    {
+        inspection = Err(error);
+    }
+    // Publication is drained before choosing the terminal request, so cancellation
+    // or lease loss during the final log upload cannot submit success.
+    let (completed, _) = supervisor
+        .drain(
+            reporter.complete(inspection),
+            liveness.as_mut(),
+            shutdown.as_mut(),
+        )
+        .await;
+    supervisor.finish(completed)
+}
+
+async fn monitor(
+    http: &Http,
+    broker: &mut Broker,
+    context: &JobContext,
+    locked_until: chrono::DateTime<chrono::Utc>,
+    period: Duration,
+) -> Result<()> {
+    let renewal = context.maintain_lease(http, locked_until, period);
+    tokio::pin!(renewal);
+    loop {
+        tokio::select! {
+            result = &mut renewal => return result,
+            message = broker.poll(true) => match message? {
+                Some(Message::Cancel(id)) if id == context.id => return Err(Failure::Cancelled),
+                Some(Message::Job(_)) => return Err(Failure::Protocol("broker assigned work while runner is busy")),
+                _ => {},
             }
         }
-    };
-    Ok((reporter.finish(inspection).await?, stop))
+    }
 }

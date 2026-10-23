@@ -109,10 +109,14 @@ document has at most 8,192 values and depth 48; masking accepts at most 384
 expanded literal entries and 32 KiB of secret strings. A conservative 64 MiB
 scan budget multiplies declaration text/key/numeric bytes plus 32 bytes per JSON value
 by the expanded masking-entry count and a factor of three for replacement
-growth. Exceeding these bounds fails inspection
-explicitly. A secret or secret line equal to `*`, `**`, or `***` also fails
-explicitly because it conflicts with the shared redaction marker. These bounds
-keep preparation finite without changing the 8 MiB response/trace ceilings.
+growth. Exceeding these bounds fails inspection explicitly. Mask matches refer
+only to original text; secrets containing `*`, `**`, or `***` are supported without
+recursively expanding inserted markers. Preparation, structured masking, bounded
+serialization, outcome accounting, and work/liveness/shutdown supervision are
+shared with GitHub. GitLab retains its credential discovery, native numeric audit,
+trace framing, and completion/reconciliation state machine. Shutdown-signal errors
+survive successful finalization and cleanup. These bounds keep preparation finite
+without changing the 8 MiB response/trace ceilings.
 
 Offline tests use local HTTP fakes and synthetic credentials. They verify
 declaration preservation, non-execution, masking, prefixes/project encoding,

@@ -156,7 +156,7 @@ fn preparation_accounts_for_rendered_number_bytes() {
     ] {
         let value: Value = serde_json::from_str(spelling).expect("JSON number");
         assert_eq!(
-            super::super::preparation::validate(&value).expect("budget"),
+            crate::preparation::validate(&value).expect("budget"),
             value.to_string().len() + 32
         );
     }
@@ -221,10 +221,14 @@ fn preparation_bounds_work_without_rejecting_large_low_cost_scripts() {
 }
 
 #[test]
-fn preparation_rejects_marker_expansion_and_excessive_metadata() {
-    for secret in ["*", "prefix\n**", &"x".repeat(33 * 1024)] {
+fn marker_fragments_are_safe_and_excessive_metadata_is_rejected() {
+    for secret in ["*", "prefix\n**"] {
         let mut input = job();
         input["variables"] = json!([{"key":"SECRET", "value":secret, "masked":true}]);
-        assert!(render(input).is_err());
+        let trace = render(input).expect("markers are masked without recursive expansion");
+        assert!(trace.bytes.len() < 16 * 1024);
     }
+    let mut input = job();
+    input["variables"] = json!([{"key":"SECRET", "value":"x".repeat(33 * 1024), "masked":true}]);
+    assert!(render(input).is_err());
 }

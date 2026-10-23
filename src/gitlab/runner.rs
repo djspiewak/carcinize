@@ -10,6 +10,7 @@ use crate::{
     config::Provider,
     error::{Failure, Result},
     http::Http,
+    lifecycle::{self, Supervisor},
 };
 use std::{future::Future, pin::Pin, time::Duration};
 use uuid::Uuid;
@@ -36,20 +37,17 @@ pub(super) async fn run_with(
         result = api.project(&config) => result?,
         signal = &mut shutdown => { signal?; return Ok(RunSummary::default()); }
     };
-    let registered = {
-        let registration = api.register(&config, project);
-        tokio::pin!(registration);
-        tokio::select! {
-            result = &mut registration => result?,
-            signal = &mut shutdown => {
-                // Creation is not cancellation-safe: recover the ID before removing it.
-                let registered = registration.await?;
-                remove(&api, &config, registered.id, timing).await?;
-                signal?;
-                return Ok(RunSummary::default());
-            }
-        }
-    };
+    let (registered, signal) =
+        lifecycle::acquire(api.register(&config, project), shutdown.as_mut()).await;
+    let registered = registered?;
+    if let Some(signal) = signal {
+        return lifecycle::combine(
+            signal
+                .map(|()| RunSummary::default())
+                .map_err(Failure::from),
+            remove(&api, &config, registered.id, timing).await,
+        );
+    }
     let result = async {
         if registered.id == 0 || registered.token.is_empty() {
             return Err(Failure::Protocol("invalid GitLab runner registration"));
@@ -79,14 +77,7 @@ pub(super) async fn run_with(
     }
     .await;
     let cleanup = remove(&api, &config, registered.id, timing).await;
-    match (result, cleanup) {
-        (Ok(summary), Ok(())) => Ok(summary),
-        (Err(error), Err(cleanup)) => {
-            eprintln!("carcinize: cleanup also failed: {cleanup}");
-            Err(error)
-        }
-        (Err(error), _) | (_, Err(error)) => Err(error),
-    }
+    lifecycle::combine(result, cleanup)
 }
 
 async fn remove(api: &Api, config: &Config, id: u64, timing: Timing) -> Result<()> {
@@ -97,16 +88,13 @@ async fn remove(api: &Api, config: &Config, id: u64, timing: Timing) -> Result<(
     }
     // Only deletion of our known identity is idempotent. Creation must not retry.
     // Four 30-second requests plus 2/4/6-second backoffs bound cleanup to 132 seconds.
-    let mut retries = 0;
-    loop {
-        match api.remove(config, id).await {
-            Err(error) if error.transient() && retries < 3 => {
-                retries += 1;
-                tokio::time::sleep(timing.retry * retries).await;
-            }
-            result => return result,
-        }
-    }
+    lifecycle::retry(
+        || api.remove(config, id),
+        Failure::transient,
+        3,
+        timing.retry,
+    )
+    .await
 }
 
 async fn listen<F: Future<Output = std::io::Result<()>>>(
@@ -122,19 +110,11 @@ async fn listen<F: Future<Output = std::io::Result<()>>>(
     let mut cursor = None;
     let mut failures = 0;
     loop {
-        let mut signal = None;
-        let polled = {
-            let poll = api.poll(&registered.token, system_id, &mut cursor);
-            tokio::pin!(poll);
-            tokio::select! {
-                result = &mut poll => result,
-                result = &mut shutdown => {
-                    signal = Some(result);
-                    // The server may have assigned a job even if our response is still pending.
-                    poll.await
-                }
-            }
-        };
+        let (polled, signal) = lifecycle::acquire(
+            api.poll(&registered.token, system_id, &mut cursor),
+            shutdown.as_mut(),
+        )
+        .await;
         let polled = match polled {
             Ok(p) => {
                 failures = 0;
@@ -182,11 +162,7 @@ async fn listen<F: Future<Output = std::io::Result<()>>>(
                     timing,
                 )
                 .await?;
-                match outcome {
-                    Outcome::Success => summary.jobs_inspected += 1,
-                    Outcome::Failed => summary.jobs_failed += 1,
-                    Outcome::Cancelled => summary.jobs_cancelled += 1,
-                }
+                summary.record(outcome);
                 eprintln!(
                     "carcinize: GitLab job {} completed: {outcome:?}",
                     context.id
@@ -205,7 +181,7 @@ async fn inspect_job<F: Future<Output = std::io::Result<()>>>(
     context: &Context,
     input: (serde_json::Value, String),
     mut shutdown: Pin<&mut F>,
-    mut signal: Option<std::io::Result<()>>,
+    signal: Option<std::io::Result<()>>,
     timing: Timing,
 ) -> Result<(Outcome, bool)> {
     let (payload, runner_token) = input;
@@ -218,17 +194,16 @@ async fn inspect_job<F: Future<Output = std::io::Result<()>>>(
     );
     let deadline = tokio::time::Instant::now() + timeout;
     let admin = config.token.clone();
-    let prepared = preparation::owned(
-        move |canceled| preparation::prepare(payload, &admin, &runner_token, &canceled),
-        async {
-            if signal.is_some() { return Failure::Cancelled; }
-            tokio::select! {
-                result = &mut shutdown => { signal = Some(result); Failure::Cancelled }
-                result = reporting::heartbeat(api, context, timing) => result.err().unwrap_or(Failure::Cancelled),
-                _ = tokio::time::sleep_until(deadline) => Failure::Protocol("GitLab inspection timed out"),
-            }
-        },
-    ).await;
+    let timestamp = chrono::Utc::now().timestamp();
+    let mut supervisor = Supervisor::new(signal, Some(deadline));
+    let prepared = crate::preparation::owned(
+        move |canceled| preparation::prepare(payload, &admin, &runner_token, &canceled, timestamp),
+        supervisor.interrupt(
+            reporting::heartbeat(api, context, timing),
+            shutdown.as_mut(),
+        ),
+    )
+    .await;
     let preparation_cancelled = matches!(prepared, Err(Failure::Cancelled));
     let mut failed = prepared.is_err();
     let trace = match prepared {
@@ -236,16 +211,16 @@ async fn inspect_job<F: Future<Output = std::io::Result<()>>>(
         Err(ref error) => trace::diagnostic(error, &context.redactor),
     };
     let mut offset = 0;
-    let result = if signal.is_some() || preparation_cancelled {
+    let result = if preparation_cancelled {
         Err(Failure::Cancelled)
-    } else if tokio::time::Instant::now() >= deadline {
-        Err(Failure::Protocol("GitLab inspection timed out"))
     } else {
-        tokio::select! {
-            result = reporting::inspect(api, context, &trace, &mut offset, timing) => result,
-            result = &mut shutdown => { signal = Some(result); Err(Failure::Cancelled) }
-            _ = tokio::time::sleep_until(deadline) => Err(Failure::Protocol("GitLab inspection timed out")),
-        }
+        supervisor
+            .run(
+                reporting::upload(api, context, &trace, &mut offset, timing),
+                reporting::heartbeat(api, context, timing),
+                shutdown.as_mut(),
+            )
+            .await
     };
     let cancelled = matches!(result, Err(Failure::Cancelled));
     if let Err(ref error) = result {
@@ -258,7 +233,7 @@ async fn inspect_job<F: Future<Output = std::io::Result<()>>>(
             context.redactor.redact(&error.to_string())
         );
     }
-    let mut cancel = if signal.is_some() {
+    let mut cancel = if supervisor.signal.is_some() {
         api.cancel(config, context).await
     } else {
         Ok(())
@@ -274,13 +249,13 @@ async fn inspect_job<F: Future<Output = std::io::Result<()>>>(
     };
     let finishing = reporting::finish(api, config, context, &trace, requested, timing);
     tokio::pin!(finishing);
-    let outcome = if signal.is_some() {
+    let outcome = if supervisor.signal.is_some() {
         finishing.await
     } else {
         tokio::select! {
             result = &mut finishing => result,
             result = &mut shutdown => {
-                signal = Some(result);
+                supervisor.signal = Some(result);
                 // Keep the in-flight update owned; cancellation changes the remote
                 // state while the same completion protocol drains to its deadline.
                 cancel = api.cancel(config, context).await;
@@ -307,10 +282,5 @@ async fn inspect_job<F: Future<Output = std::io::Result<()>>>(
             return Err(error);
         }
     };
-    cancel?;
-    let stop = signal.is_some();
-    if let Some(result) = signal {
-        result?;
-    }
-    Ok((outcome, stop))
+    supervisor.finish(lifecycle::combine(Ok(outcome), cancel))
 }

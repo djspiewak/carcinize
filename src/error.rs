@@ -1,4 +1,10 @@
-use crate::github::model::DecodeError;
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum DecodeError {
+    #[error("malformed {0}")]
+    Malformed(&'static str),
+    #[error("unsupported {0}")]
+    Unsupported(&'static str),
+}
 
 /// A configuration, protocol, or transport failure. Diagnostics omit remote bodies and credentials.
 #[derive(Debug, thiserror::Error)]

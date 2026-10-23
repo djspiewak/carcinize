@@ -4,7 +4,7 @@ mod feed;
 use crate::{
     error::{Failure, Result},
     github::job_context::{Conclusion, JobContext},
-    github::model::Job,
+    github::preparation::Step,
     http::*,
     redact::Redactor,
 };
@@ -17,7 +17,6 @@ use uuid::Uuid;
 const RECEIVER: &str = "twirp/results.services.receiver.Receiver/";
 const STEPS: &str =
     "twirp/github.actions.results.api.v1.WorkflowStepUpdateService/WorkflowStepsUpdate";
-const BANNER: &str = "CARCINIZE INSPECTION ONLY: declarations are echoed; no scripts, actions, expressions, or conditions are executed.";
 
 enum Phase {
     Pending,
@@ -123,7 +122,7 @@ impl Record {
     }
 }
 
-pub(crate) struct Reporter<'a> {
+pub(super) struct Reporter<'a> {
     http: Http,
     context: &'a JobContext,
     results_url: Url,
@@ -136,15 +135,19 @@ pub(crate) struct Reporter<'a> {
 }
 
 impl<'a> Reporter<'a> {
-    pub fn new(http: Http, context: &'a JobContext, redactor: Redactor, job: &Job) -> Result<Self> {
-        let records = job
-            .steps
+    pub fn new(
+        http: Http,
+        context: &'a JobContext,
+        redactor: Redactor,
+        steps: &[Step],
+    ) -> Result<Self> {
+        let records = steps
             .iter()
             .enumerate()
             .map(|(i, s)| Record {
                 id: s.id,
                 number: i + 1,
-                name: redactor.redact(&s.label()),
+                name: s.label.clone(),
                 phase: Phase::Pending,
             })
             .collect();
@@ -163,7 +166,7 @@ impl<'a> Reporter<'a> {
         })
     }
 
-    pub async fn inspect(&mut self, job: &Job) -> Result<()> {
+    pub async fn inspect(&mut self, steps: &[Step]) -> Result<()> {
         let url = self
             .context
             .feed_url
@@ -171,7 +174,7 @@ impl<'a> Reporter<'a> {
             .ok_or(Failure::Protocol("job has no live feed URL"))?;
         self.feed = Some(feed::Feed::connect(url, &self.context.token).await?);
         self.update_steps().await?;
-        for (index, step) in job.steps.iter().enumerate() {
+        for (index, step) in steps.iter().enumerate() {
             let record = self
                 .records
                 .get_mut(index)
@@ -180,34 +183,15 @@ impl<'a> Reporter<'a> {
                 started: timestamp(),
             };
             self.update_steps().await?;
-            let mut text = format!("{BANNER}\n");
-            if index == 0 {
-                let header = json!({"job":job.name,"display_name":job.display_name,"environment":job.environment,
-                    "defaults":job.defaults,"container":job.container,"services":job.services,"outputs":job.outputs,
-                    "file_table":job.file_table});
-                text.push_str(
-                    &serde_json::to_string_pretty(&header)
-                        .map_err(|_| Failure::Protocol("render job declaration"))?,
-                );
-                text.push('\n');
-            }
-            text.push_str(
-                &serde_json::to_string_pretty(step)
-                    .map_err(|_| Failure::Protocol("render step declaration"))?,
-            );
-            let lines = output_lines(&self.redactor.redact(&text));
-            let log = timestamped(&lines);
-            if log.len() > MAX_BODY.saturating_sub(self.job_log.len()) {
-                return Err(Failure::Protocol("inspection logs exceed 8 MiB"));
-            }
-            self.job_log.push_str(&log);
-            self.job_lines += lines.len();
+            self.job_log.push_str(&step.log);
+            self.job_lines += step.lines.len();
             self.feed
                 .as_mut()
                 .ok_or(Failure::Protocol("missing live feed"))?
-                .send(step.id, &lines)
+                .send(step.id, &step.lines)
                 .await?;
-            self.upload_log(Some(step.id), log, lines.len()).await?;
+            self.upload_log(Some(step.id), step.log.clone(), step.lines.len())
+                .await?;
             self.records
                 .get_mut(index)
                 .ok_or(Failure::Protocol("missing step record"))?
@@ -302,10 +286,8 @@ impl<'a> Reporter<'a> {
         Ok(())
     }
 
-    pub async fn finish(mut self, inspection: Result<()>) -> Result<Conclusion> {
-        let cancelled = matches!(inspection, Err(Failure::Cancelled));
-        let mut failure = inspection.err();
-        let outcome = if cancelled {
+    pub fn settle(&mut self, inspection: &Result<()>) {
+        let outcome = if matches!(inspection, Err(Failure::Cancelled)) {
             StepOutcome::Cancelled
         } else {
             StepOutcome::Failed
@@ -317,23 +299,22 @@ impl<'a> Reporter<'a> {
                 Phase::Finished { .. } => {}
             }
         }
-        if let Err(error) = self.update_steps().await
-            && failure.is_none()
-        {
-            failure = Some(error);
-        }
+    }
+
+    pub async fn publish(&mut self) -> Result<()> {
+        let result = self.update_steps().await;
         let job_log = std::mem::take(&mut self.job_log);
-        if let Err(error) = self.upload_log(None, job_log, self.job_lines).await
-            && failure.is_none()
-        {
-            failure = Some(error);
-        }
-        if let Some(feed) = &mut self.feed
-            && let Err(error) = feed.close().await
-            && failure.is_none()
-        {
-            failure = Some(error);
-        }
+        let upload = self.upload_log(None, job_log, self.job_lines).await;
+        let close = match &mut self.feed {
+            Some(feed) => feed.close().await,
+            None => Ok(()),
+        };
+        crate::lifecycle::combine(crate::lifecycle::combine(result, upload), close)
+    }
+
+    pub async fn complete(self, inspection: Result<()>) -> Result<Conclusion> {
+        let cancelled = matches!(inspection, Err(Failure::Cancelled));
+        let failure = inspection.err();
         let conclusion = if cancelled {
             Conclusion::Cancelled
         } else if failure.is_some() {
@@ -354,25 +335,4 @@ impl<'a> Reporter<'a> {
 
 fn timestamp() -> String {
     Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-}
-
-fn output_lines(text: &str) -> Vec<String> {
-    text.lines()
-        .flat_map(|line| {
-            let chars: Vec<_> = line.chars().collect();
-            if chars.is_empty() {
-                vec!["carcinize |".into()]
-            } else {
-                chars
-                    .chunks(1000)
-                    .map(|chunk| format!("carcinize | {}", chunk.iter().collect::<String>()))
-                    .collect()
-            }
-        })
-        .collect()
-}
-
-fn timestamped(lines: &[String]) -> String {
-    let now = timestamp();
-    lines.iter().map(|line| format!("{now} {line}\n")).collect()
 }

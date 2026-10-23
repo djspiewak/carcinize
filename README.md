@@ -120,8 +120,11 @@ non-execution, redaction, live and archived logs, failure, and cleanup.
 
 Domain declarations are independent of protocol credentials. Provider-specific
 models and synchronous rendering remain separate from network orchestration.
-The providers share configuration dispatch, summaries, HTTP infrastructure, and
-redaction. The binary entry point only parses arguments and wires the library
+The providers share configuration dispatch, outcomes and summaries, HTTP infrastructure,
+bounded preparation, structured masking/rendering, and lifecycle supervision. Pure
+provider decoders run on an owned blocking worker; shared supervision coordinates
+liveness, shutdown, and deadlines. Provider adapters retain acquisition rules,
+credential discovery, declaration models, and reporting/completion protocols. The binary entry point only parses arguments and wires the library
 to the shutdown signal. `Config::new` retains GitHub behavior;
 `Config::new_gitlab(host, project, labels, name, token)` selects GitLab through
 the same `run` function and JSON summary.
@@ -143,11 +146,19 @@ semantic discriminants fail inspection instead of becoming opaque strings.
 The server may already have transformed expressions before dispatch; the PoC
 preserves the declarations it receives, not the original workflow YAML verbatim.
 
-Responses and combined inspection logs are each limited to 8 MiB. Logs are masked
-before splitting or transport. Full credential-bearing job envelopes are never
+Responses and combined inspection logs are each limited to 8 MiB. Decoded declaration
+values and keys are masked before JSON escaping, splitting, or transport. Mask
+matches are computed against original text, so inserted markers cannot recursively
+expand. Both providers apply preparation structure, metadata, and masking-work
+budgets; oversized work fails the owned job. Full credential-bearing job envelopes are never
 logged. Completed step logs and the combined job log use final blob uploads; the
 WebSocket feed provides output while the job is active. A cancelled in-flight step
 can have its partial output in the combined archive without a completed step blob.
+GitHub lease renewal and cancellation monitoring continue through final log
+publication. In-flight final writes are drained before cleanup; shutdown-signal
+errors are returned even when terminal reporting succeeds. Preparation and inspection
+have a 24-hour safety deadline on GitHub; GitLab uses its dispatched timeout capped
+at 24 hours. Bounded finalization and cleanup can extend beyond that deadline.
 
 Protocol details and dependency choices are in [docs/protocol.md](docs/protocol.md).
 Successful live run URLs and verification limits are recorded in

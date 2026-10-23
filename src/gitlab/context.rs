@@ -1,11 +1,8 @@
 //! Decode the reporting identity and masking data before interpreting job semantics.
-use super::{
-    declarations::{Variable, null_default},
-    masking::Masking,
-    preparation,
-};
+use super::declarations::{Variable, null_default};
 use crate::{
     error::{Failure, Result},
+    preparation,
     redact::Redactor,
 };
 use regex::Regex;
@@ -82,7 +79,7 @@ impl Context {
         if wire.id == 0 || wire.job_info.project_id == 0 || wire.token.is_empty() {
             return Err(Failure::Protocol("invalid GitLab reporting identity"));
         }
-        let mut redactor = Masking::new();
+        let mut redactor = Redactor::default();
         for secret in [admin, runner, wire.token.as_str()] {
             redactor.add(secret)?;
         }
@@ -128,12 +125,12 @@ impl Context {
             id: wire.id,
             project_id: wire.job_info.project_id,
             token: wire.token,
-            redactor: redactor.redactor,
+            redactor,
         })
     }
 }
 
-fn collect(value: &Value, urls: &Regex, redactor: &mut Masking, depth: usize) -> Result<()> {
+fn collect(value: &Value, urls: &Regex, redactor: &mut Redactor, depth: usize) -> Result<()> {
     if depth > 64 {
         return Err(Failure::Protocol("GitLab job exceeds nesting limit"));
     }

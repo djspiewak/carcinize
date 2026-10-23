@@ -48,6 +48,8 @@ enum Mode {
     HeartbeatRetry,
     HeartbeatExhausted,
     HeartbeatTransport,
+    StopPatchSignalError,
+    StopFinalSignalError,
 }
 
 struct Event {
@@ -372,6 +374,15 @@ async fn exercise(
     jobs: Vec<Value>,
     mode: Mode,
 ) -> (crate::error::Result<crate::RunSummary>, Arc<Fake>) {
+    let signal_failure = matches!(
+        mode,
+        Mode::StopPatchSignalError | Mode::StopFinalSignalError
+    );
+    let mode = match mode {
+        Mode::StopPatchSignalError => Mode::StopPatch,
+        Mode::StopFinalSignalError => Mode::StopFinal,
+        mode => mode,
+    };
     let (stop, stopped) = oneshot::channel();
     let fake = Arc::new(Fake {
         mode,
@@ -416,7 +427,11 @@ async fn exercise(
         api,
         async {
             stopped.await.expect("shutdown");
-            Ok(())
+            if signal_failure {
+                Err(std::io::Error::other("synthetic shutdown failure"))
+            } else {
+                Ok(())
+            }
         },
         timing,
     )
@@ -785,5 +800,35 @@ async fn shutdown_cancellation_error_is_returned_even_if_finalization_succeeds()
     assert_eq!(
         data.events.last().expect("runner cleanup").path,
         "runners/7"
+    );
+}
+
+#[tokio::test]
+async fn signal_errors_during_inspection_and_finalization_survive_cleanup() {
+    for mode in [Mode::StopPatchSignalError, Mode::StopFinalSignalError] {
+        let (result, fake) = exercise(vec![job()], mode).await;
+        crate::tests::contracts::shutdown_error(result);
+        let data = fake.data.lock().expect("lock");
+        assert!(data.events.iter().any(|e| e.path.ends_with("/cancel")));
+        assert_eq!(data.events.last().expect("cleanup").path, "runners/7");
+    }
+}
+
+#[tokio::test]
+async fn escaped_secrets_are_masked_before_trace_publication() {
+    let mut payload = job();
+    payload["variables"] = json!([
+        {"key":"FIRST", "value":"masked-first\nmasked-second", "masked":true},
+        {"key":"SECOND", "value":"quote\"secret\"", "masked":true}
+    ]);
+    payload["steps"][0]["script"] = json!(["masked-first\nmasked-second quote\"secret\"\nexit 97"]);
+    let (result, fake) = exercise(vec![payload], Mode::Normal).await;
+    assert_eq!(result.expect("inspection").jobs_inspected, 1);
+    let data = fake.data.lock().expect("lock");
+    let trace = String::from_utf8(data.traces[&101].clone()).expect("UTF-8");
+    crate::tests::contracts::output(
+        &trace,
+        &["masked-first", "masked-second", "quote"],
+        &["exit 97"],
     );
 }

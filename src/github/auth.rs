@@ -1,4 +1,5 @@
 //! Repository registration and runner OAuth identity; never job credentials.
+use super::COMPATIBLE_RUNNER_VERSION;
 use crate::{
     config::{Config, runner_arch, runner_os},
     error::{Failure, Result},
@@ -61,10 +62,9 @@ impl Identity {
     }
 }
 
-#[derive(Deserialize)]
 pub(crate) struct RegisteredRunner {
     pub id: u64,
-    pub authorization: RunnerAuthorization,
+    pub authorization: Result<RunnerAuthorization>,
 }
 
 #[derive(Deserialize)]
@@ -152,18 +152,26 @@ pub(crate) async fn register_runner(
         .find(|g| g.default)
         .ok_or(Failure::Protocol("no default runner group"))?;
     let labels = labels(config);
-    http.json(
-        http.client
-            .post(endpoint(api, "actions/runners/register")?)
-            .header("authorization", authorization("RemoteAuth", &token.token)?)
-            .json(
-                &json!({"url":config.github_url(),"group_id":group.id,"name":config.name,
+    let response: serde_json::Value = http
+        .json(
+            http.client
+                .post(endpoint(api, "actions/runners/register")?)
+                .header("authorization", authorization("RemoteAuth", &token.token)?)
+                .json(
+                    &json!({"url":config.github_url(),"group_id":group.id,"name":config.name,
             "version":COMPATIBLE_RUNNER_VERSION,"updates_disabled":true,"ephemeral":false,
             "labels":labels,"public_key":identity.public_xml()}),
-            ),
-        "register runner",
-    )
-    .await
+                ),
+            "register runner",
+        )
+        .await?;
+    let id = registration_id(&response)?;
+    let authorization = response
+        .get("authorization")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .ok_or(Failure::Protocol("malformed runner authorization"));
+    Ok(RegisteredRunner { id, authorization })
 }
 
 fn labels(config: &Config) -> Vec<serde_json::Value> {
@@ -215,32 +223,7 @@ async fn register_through_tenant(
         .iter()
         .find(|p| p.is_internal && !p.is_hosted)
         .ok_or(Failure::Protocol("no default runner pool"))?;
-    #[derive(Deserialize)]
-    struct Property {
-        #[serde(rename = "$value")]
-        value: String,
-    }
-    #[derive(Deserialize, Default)]
-    struct Properties {
-        #[serde(rename = "ServerUrlV2")]
-        broker: Option<Property>,
-        #[serde(rename = "AuthorizationUrlV2")]
-        authorization: Option<Property>,
-    }
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Authorization {
-        client_id: String,
-        authorization_url: String,
-    }
-    #[derive(Deserialize)]
-    struct Agent {
-        id: u64,
-        authorization: Authorization,
-        #[serde(default)]
-        properties: Properties,
-    }
-    let agent: Agent = http.json(http.client.post(endpoint(&base,&format!("_apis/distributedtask/pools/{}/agents",pool.id))?)
+    let agent: serde_json::Value = http.json(http.client.post(endpoint(&base,&format!("_apis/distributedtask/pools/{}/agents",pool.id))?)
         .query(&[("api-version","6.0-preview")])
         .header("authorization",authorization("Bearer",&tenant.token)?)
         .json(&json!({"name":config.name,"version":COMPATIBLE_RUNNER_VERSION,
@@ -248,20 +231,61 @@ async fn register_through_tenant(
             "enabled":true,"ephemeral":false,"disableUpdate":true,"labels":labels(config),
             "authorization":{"publicKey":{"exponent":STANDARD.encode(identity.key.e().to_bytes_be()),
                 "modulus":STANDARD.encode(identity.key.n().to_bytes_be())}}})), "register tenant runner").await?;
-    // Return the identity even if the broker URL is missing, so startup validation
-    // can reject it within the caller's registration cleanup scope.
-    Ok(RegisteredRunner {
-        id: agent.id,
-        authorization: RunnerAuthorization {
-            client_id: agent.authorization.client_id,
-            authorization_url: agent
+    let id = registration_id(&agent)?;
+    // Ancillary decoding errors travel with the identity, so the caller can
+    // establish its cleanup scope before propagating them.
+    let authorization = (|| {
+        #[derive(Deserialize)]
+        struct Property {
+            #[serde(rename = "$value")]
+            value: String,
+        }
+        #[derive(Deserialize, Default)]
+        struct Properties {
+            #[serde(rename = "ServerUrlV2")]
+            broker: Option<Property>,
+            #[serde(rename = "AuthorizationUrlV2")]
+            authorization: Option<Property>,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Authorization {
+            client_id: String,
+            authorization_url: String,
+        }
+        #[derive(Deserialize)]
+        struct Metadata {
+            authorization: Authorization,
+            #[serde(default)]
+            properties: Properties,
+        }
+        let metadata: Metadata = serde_json::from_value(agent)
+            .map_err(|_| Failure::Protocol("malformed tenant runner authorization"))?;
+        Ok(RunnerAuthorization {
+            client_id: metadata.authorization.client_id,
+            authorization_url: metadata
                 .properties
                 .authorization
                 .map(|p| p.value)
-                .unwrap_or(agent.authorization.authorization_url),
-            server_url: agent.properties.broker.map(|p| p.value).unwrap_or_default(),
-        },
-    })
+                .unwrap_or(metadata.authorization.authorization_url),
+            server_url: metadata
+                .properties
+                .broker
+                .ok_or(Failure::Protocol("missing modern broker URL"))?
+                .value,
+        })
+    })();
+    Ok(RegisteredRunner { id, authorization })
+}
+
+fn registration_id(value: &serde_json::Value) -> Result<u64> {
+    value
+        .get("id")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|id| *id > 0)
+        .ok_or(Failure::Protocol(
+            "registration response omitted runner identity; cleanup could not be confirmed",
+        ))
 }
 
 pub(crate) async fn remove_runner(http: &Http, api: &Url, config: &Config, id: u64) -> Result<()> {
@@ -292,6 +316,9 @@ pub(crate) struct RunnerAuth {
 
 impl RunnerAuth {
     pub fn new(identity: Identity, auth: &RunnerAuthorization) -> Result<Self> {
+        if auth.client_id.is_empty() {
+            return Err(Failure::Protocol("missing runner authorization identity"));
+        }
         Ok(Self {
             identity,
             client_id: auth.client_id.clone(),

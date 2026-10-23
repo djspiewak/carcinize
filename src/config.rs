@@ -28,16 +28,7 @@ impl Config {
         token: String,
     ) -> Result<Self, Error> {
         let parts = repository.split('/').collect::<Vec<_>>();
-        if parts.len() != 2
-            || parts.iter().any(|p| {
-                p.is_empty()
-                    || *p == "."
-                    || *p == ".."
-                    || !p
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
-            })
-        {
+        if parts.len() != 2 || parts.iter().any(|part| !identifier_segment(part)) {
             return Err(Failure::Config("repository must be owner/repo").into());
         }
         Self::validated(Provider::Github, repository, labels, name, token)
@@ -56,15 +47,7 @@ impl Config {
         token: String,
     ) -> Result<Self, Error> {
         let parts: Vec<_> = project.split('/').collect();
-        if parts.len() < 2
-            || parts.iter().any(|part| {
-                part.is_empty()
-                    || matches!(*part, "." | "..")
-                    || !part
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
-            })
-        {
+        if parts.len() < 2 || parts.iter().any(|part| !identifier_segment(part)) {
             return Err(Failure::Config("GitLab project must be a namespaced project path").into());
         }
         if host.is_empty()
@@ -141,6 +124,14 @@ impl Config {
     pub(crate) fn github_url(&self) -> String {
         format!("https://github.com/{}", self.repository)
     }
+}
+
+fn identifier_segment(part: &str) -> bool {
+    !part.is_empty()
+        && !matches!(part, "." | "..")
+        && part
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
 }
 
 pub(crate) fn runner_os() -> &'static str {
