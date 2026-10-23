@@ -1,7 +1,7 @@
 use crate::{
-    auth::RunnerAuth,
     config::{runner_arch, runner_os},
     error::{Failure, Result},
+    github::auth::RunnerAuth,
     http::*,
 };
 use reqwest::Method;

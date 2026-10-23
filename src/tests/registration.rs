@@ -1,5 +1,5 @@
 use super::*;
-use crate::{auth::*, config::Config, http::Http};
+use crate::{config::Config, github::auth::*, http::Http};
 use axum::{
     Json,
     extract::State,

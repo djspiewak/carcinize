@@ -148,3 +148,17 @@ proptest::proptest! {
         proptest::prop_assert_eq!(decoded.as_literal(), Some(text.as_str()));
     }
 }
+
+#[test]
+fn reserved_number_object_is_not_a_numeric_template() {
+    for wire in [
+        r#"{"$serde_json::private::Number":"123"}"#,
+        r#"{"type":6,"num":{"$serde_json::private::Number":"123"}}"#,
+    ] {
+        let value = serde_json::from_str(wire).expect("valid JSON object");
+        assert!(
+            decode_template(value).is_err(),
+            "malformed template accepted: {wire}"
+        );
+    }
+}

@@ -17,8 +17,12 @@ pub(crate) struct Http {
 
 impl Http {
     pub fn new() -> Result<Self> {
+        Self::with_user_agent(USER_AGENT)
+    }
+
+    pub fn with_user_agent(user_agent: &'static str) -> Result<Self> {
         let client = Client::builder()
-            .user_agent(USER_AGENT)
+            .user_agent(user_agent)
             .connect_timeout(Duration::from_secs(10))
             .read_timeout(POLL_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
@@ -29,7 +33,7 @@ impl Http {
     }
 
     pub async fn send(&self, request: RequestBuilder, operation: &'static str) -> Result<Response> {
-        let response = request.send().await.map_err(|e| transport(operation, e))?;
+        let response = self.exchange(request, operation).await?;
         if !response.status().is_success() {
             return Err(Failure::Http {
                 operation,
@@ -37,6 +41,15 @@ impl Http {
             });
         }
         Ok(response)
+    }
+
+    // Some runner protocols use non-2xx responses for range reconciliation and cancellation.
+    pub async fn exchange(
+        &self,
+        request: RequestBuilder,
+        operation: &'static str,
+    ) -> Result<Response> {
+        request.send().await.map_err(|e| transport(operation, e))
     }
 
     pub async fn json<T: DeserializeOwned>(

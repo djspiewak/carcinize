@@ -1,0 +1,26 @@
+{
+  "id": 101,
+  "token": "synthetic-job-token",
+  "job_info": {"name":"inspect","stage":"test","project_id":42,"project_name":"group / sub / project"},
+  "git_info": {"repo_url":"https://gitlab-ci-token:url-password@example.test/group/sub/project.git","ref":"topic","sha":"abc","before_sha":"def","ref_type":"branch","refspecs":["+refs/heads/topic:refs/remotes/origin/topic"],"depth":20},
+  "runner_info": {"timeout":60},
+  "allow_git_fetch":true,
+  "variables":[
+    {"key":"PUBLIC","value":"declaration","public":true,"masked":false,"raw":true},
+    {"key":"PRIVATE","value":"private-value","public":false},
+    {"key":"MASKED","value":"masked-value","public":true,"masked":true},
+    {"key":"FILE","value":"file-contents","public":true,"file":true}
+  ],
+  "steps":[
+    {"name":"script","script":["echo before_script","printf '雪 café\n'\nexit 97"],"timeout":60,"when":"on_success","allow_failure":false},
+    {"name":"after_script","script":["exit 99"],"timeout":60,"when":"always","allow_failure":true}
+  ],
+  "hooks":[{"name":"pre_get_sources_script","script":["exit 96"]}],
+  "image":{"name":"unavailable.invalid/inspection:v1","entrypoint":["/missing"],"pull_policy":["never"]},
+  "services":[{"name":"unavailable.invalid/service:v1","alias":"database","variables":[{"key":"SERVICE_SECRET","value":"service-secret"}]}],
+  "artifacts":[{"paths":["absent.txt"],"when":"always","artifact_type":"archive","artifact_format":"zip"}],
+  "cache":[{"key":"declared-cache","paths":["missing/"],"policy":"pull-push","when":"on_success"}],
+  "dependencies":[{"id":100,"name":"previous","token":"dependency-token","artifacts_file":{"filename":"artifact.zip","size":123}}],
+  "credentials":[{"type":"registry","url":"registry.example.test","username":"registry-user","password":"registry-password"}],
+  "features":{"trace_sections":true,"failure_reasons":["runner_system_failure","job_canceled"]}
+}

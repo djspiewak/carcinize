@@ -1,4 +1,4 @@
-use crate::model::DecodeError;
+use crate::github::model::DecodeError;
 
 /// A configuration, protocol, or transport failure. Diagnostics omit remote bodies and credentials.
 #[derive(Debug, thiserror::Error)]

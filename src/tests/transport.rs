@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
-    auth::{Identity, RunnerAuth, RunnerAuthorization},
-    broker::Broker,
+    github::auth::{Identity, RunnerAuth, RunnerAuthorization},
+    github::broker::Broker,
     http::Http,
 };
 use axum::{

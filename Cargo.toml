@@ -3,13 +3,14 @@ name = "carcinize"
 version = "0.1.0"
 edition = "2024"
 publish = false
-description = "An inspection-only GitHub Actions runner"
+description = "An inspection-only GitHub Actions and GitLab Pipeline runner"
 
 [dependencies]
 anyhow = "1"
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 clap = { version = "4", features = ["derive"] }
+crc32fast = "1"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 jsonwebtoken = { version = "9", default-features = false }
 rand = "0.8"

@@ -1,5 +1,5 @@
 //! The inspected declarations, deliberately independent of transport credentials.
-use crate::protocol_enum::ProtocolEnum;
+use crate::github::protocol_enum::ProtocolEnum;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;

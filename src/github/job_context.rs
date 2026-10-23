@@ -1,7 +1,7 @@
 use crate::{
     error::{Failure, Result},
+    github::protocol_enum::ProtocolEnum,
     http::*,
-    protocol_enum::ProtocolEnum,
     redact::Redactor,
 };
 use chrono::{DateTime, Utc};

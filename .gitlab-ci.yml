@@ -1,0 +1,84 @@
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "web" || $CI_PIPELINE_SOURCE == "api"'
+    - when: never
+
+variables:
+  CARCINIZE_EXAMPLE:
+    value: semantic
+    options: [minimal, semantic, native]
+    description: Inspection-only protocol experiment
+  CARCINIZE_RUNNER_TAG:
+    value: carcinize
+    description: Tag registered by the laptop runner
+
+default:
+  tags: ["$CARCINIZE_RUNNER_TAG"]
+  timeout: 5 minutes
+
+minimal:
+  rules:
+    - if: '$CARCINIZE_EXAMPLE == "minimal"'
+  script:
+    - |
+      echo "This declaration must be inspected, not executed"
+      exit 97
+
+semantic:
+  rules:
+    - if: '$CARCINIZE_EXAMPLE == "semantic"'
+  variables:
+    DECLARED_VALUE: job environment survives decoding
+    UNEXPANDED: "$DECLARED_VALUE"
+  image:
+    name: unavailable.invalid/carcinize/image:inspection
+    entrypoint: ["/this-program-does-not-exist"]
+  services:
+    - name: unavailable.invalid/carcinize/service:inspection
+      alias: database
+      command: ["exit", "98"]
+  hooks:
+    pre_get_sources_script:
+      - exit 96
+  before_script:
+    - echo "GitLab merges before_script into the script declaration"
+  script:
+    - |
+      cd this-directory-does-not-exist
+      printf '雪 café\n'
+      exit 97
+  after_script:
+    - exit 99
+  cache:
+    key: inspection-only
+    paths: [this-cache-does-not-exist/]
+    policy: pull-push
+  artifacts:
+    paths: [this-artifact-does-not-exist.txt]
+    when: always
+    expire_in: 1 day
+
+native:
+  rules:
+    - if: '$CARCINIZE_EXAMPLE == "native"'
+  run:
+    - name: script
+      script: |
+        echo "This named script must never execute"
+        exit 97
+      env:
+        DECLARED: '${{ job.CI_COMMIT_REF_NAME }}'
+    - name: reference
+      step: unavailable.invalid/carcinize/step@v1
+      inputs:
+        message: '${{ steps.script.outputs.not_produced }}'
+        count: 3
+        enabled: true
+      env:
+        DECLARED: preserved environment
+    - run:
+        - exec:
+            command: [/this-program-does-not-exist, --inspection-only]
+            work_dir: /this-directory-does-not-exist
+      outputs:
+        declared: '${{ steps.script.outputs.not_produced }}'

@@ -6,13 +6,13 @@ mod lifecycle;
 mod registration;
 mod transport;
 
-struct Server {
-    base: Url,
+pub(crate) struct Server {
+    pub(crate) base: Url,
     task: JoinHandle<()>,
 }
 
 impl Server {
-    async fn start(router: Router) -> Self {
+    pub(crate) async fn start(router: Router) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind fake");
         let base = Url::parse(&format!(
             "http://{}/",

@@ -1,5 +1,5 @@
 use super::*;
-use crate::{Config, auth::Identity, http::Http, runner};
+use crate::{Config, github::auth::Identity, github::runner, http::Http};
 use axum::{
     Json,
     body::Bytes,
@@ -208,7 +208,7 @@ async fn exercise(
     mode: Mode,
 ) -> (
     Fake,
-    std::result::Result<runner::RunSummary, crate::error::Failure>,
+    std::result::Result<crate::RunSummary, crate::error::Failure>,
 ) {
     let directory = tempfile::tempdir().expect("temporary directory");
     let marker = directory.path().join("must-not-exist");

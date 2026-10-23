@@ -3,9 +3,9 @@ mod feed;
 
 use crate::{
     error::{Failure, Result},
+    github::job_context::{Conclusion, JobContext},
+    github::model::Job,
     http::*,
-    job_context::{Conclusion, JobContext},
-    model::Job,
     redact::Redactor,
 };
 use chrono::Utc;

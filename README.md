@@ -1,8 +1,10 @@
 # carcinize
 
-A standalone, inspection-only GitHub Actions runner written in Rust. It registers
-with GitHub, receives structured jobs, and reports each declaration as a separate
-step with live and archived logs. It does not invoke GitHub's runner binary.
+A standalone, inspection-only GitHub Actions and GitLab Pipeline runner written
+in Rust. It registers with the selected provider, receives structured jobs, and
+reports declarations with live and archived logs. It does not invoke either
+provider's runner binary. GitHub uses individual step records; GitLab uses job
+trace sections.
 
 **Success means inspection and reporting succeeded. Nothing in the workflow is
 executed.** Conditions and expressions are preserved, including conditions that
@@ -58,6 +60,52 @@ Use the run page to inspect individual steps and live output, then download the
 logs or use `gh run view RUN_ID --log`. Dispatch the semantic example twice without
 restarting carcinize to check that one registration accepts multiple jobs.
 
+## GitLab on a laptop
+
+Set `GITLAB_TOKEN` in the process environment to an access token with `api` access
+and permission to create and manage project runners. On GitLab 17.7, creation
+requires project Owner access; scoped tokens also need `create_runner` and
+`manage_runner`. Keep tokens out of command arguments and logs.
+
+```sh
+./target/release/carcinize run --provider gitlab \
+  --host gitlab.example.com --repo group/subgroup/project --label carcinize
+```
+
+`--host` is required and is never inferred from Git remotes. It accepts a
+hostname with an optional port or an HTTPS base URL, including a deployment
+prefix such as `https://gitlab.example.com/gitlab`. HTTP, embedded credentials,
+queries, and fragments are rejected. GitHub remains the default provider and
+does not accept `--host`.
+
+GitLab labels become runner tags. The transient runner is locked to the selected
+project and does not accept untagged jobs. It processes jobs sequentially until
+Ctrl-C, cancels its active job if necessary, and deletes its own registration.
+Runner credentials stay in memory; an existing runner is never replaced.
+
+The GitLab experiment pipeline starts only through the API or the web UI:
+
+```sh
+glab ci run --repo https://gitlab.example.com/group/subgroup/project \
+  --branch main --variables CARCINIZE_EXAMPLE:minimal
+glab ci run --repo https://gitlab.example.com/group/subgroup/project \
+  --branch main --variables CARCINIZE_EXAMPLE:semantic
+glab ci run --repo https://gitlab.example.com/group/subgroup/project \
+  --branch main --variables CARCINIZE_EXAMPLE:native
+```
+
+Use `CARCINIZE_RUNNER_TAG` to select a different tag. Repeat the semantic example
+without restarting the runner to test multiple assignments. Inspect the job
+trace in GitLab or with `glab ci trace JOB_ID`. Deliberate failing commands and
+unavailable images/step references must appear in successful inspection logs.
+These pipelines do not build or test the project; run `make verify` locally.
+
+GitLab inspection preserves the dispatched declaration, including native `run:`
+steps, inputs, environments, nested sequences, action references, and executable
+declarations. It never resolves or executes them. GitLab merges `before_script`
+into the dispatched script and evaluates pipeline rules before assignment; the
+original YAML and skipped jobs cannot be reconstructed from that response.
+
 ## Development
 
 ```sh
@@ -66,18 +114,21 @@ make verify
 
 This checks formatting, all-target compilation, Clippy with warnings denied, unit
 and boundary tests, and documentation tests. Tests use synthetic inputs and local
-HTTP/WebSocket servers; they need no GitHub access or credentials. They cover
+HTTP/WebSocket servers; they need no provider access or real credentials. They cover
 semantic preservation, registration and signed authentication, job lifecycle,
 non-execution, redaction, live and archived logs, failure, and cleanup.
 
-Domain declarations are independent of protocol credentials. The model decoder
-and redactor are synchronous; registration, broker, job context, and reporting
-modules own their I/O. The binary entry point only parses arguments and wires the
-library to the shutdown signal.
+Domain declarations are independent of protocol credentials. Provider-specific
+models and synchronous rendering remain separate from network orchestration.
+The providers share configuration dispatch, summaries, HTTP infrastructure, and
+redaction. The binary entry point only parses arguments and wires the library
+to the shutdown signal. `Config::new` retains GitHub behavior;
+`Config::new_gitlab(host, project, labels, name, token)` selects GitLab through
+the same `run` function and JSON summary.
 
 ## Compatibility and limits
 
-This PoC targets repository runners on GitHub.com. It supports the runner-admin
+The GitHub provider targets repository runners on GitHub.com. It supports the runner-admin
 and tenant registration handshakes, then uses the modern broker, run-service,
 and Results protocols, using
 [`actions/runner` v2.338.1](https://github.com/actions/runner/tree/e78522a9a7b01c3bcd7ac0da6e3a9bb6cd513a76/src)
@@ -101,3 +152,10 @@ can have its partial output in the combined archive without a completed step blo
 Protocol details and dependency choices are in [docs/protocol.md](docs/protocol.md).
 Successful live run URLs and verification limits are recorded in
 [docs/acceptance.md](docs/acceptance.md).
+
+The GitLab provider follows Runner 17.7.1 and targets GitLab 17.7-compatible
+servers through an explicit host. Protocol behavior, masking, cancellation,
+cleanup bounds, and unsupported external secret-provider declarations are
+documented in [docs/gitlab-protocol.md](docs/gitlab-protocol.md). A crashed
+process or an ambiguous registration/assignment response can leave server-side
+state; inspect and remove only that invocation's runner in project CI/CD settings.

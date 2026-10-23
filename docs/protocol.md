@@ -1,5 +1,8 @@
 # Protocol boundary
 
+This document covers GitHub Actions. See [gitlab-protocol.md](gitlab-protocol.md)
+for the GitLab provider, its pinned reference, and separate reporting protocol.
+
 Reference: official runner v2.338.1, commit
 `e78522a9a7b01c3bcd7ac0da6e3a9bb6cd513a76`.
 

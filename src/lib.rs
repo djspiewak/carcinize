@@ -1,15 +1,11 @@
-//! A standalone, inspection-only GitHub Actions runner.
+//! Native, inspection-only GitHub Actions and GitLab Pipeline runners.
 
-mod auth;
-mod broker;
 mod config;
 mod error;
+mod github;
+mod gitlab;
 mod http;
-mod job_context;
-mod model;
-mod protocol_enum;
 mod redact;
-mod reporting;
 mod runner;
 
 pub use config::Config;
